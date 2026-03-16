@@ -22,6 +22,11 @@ Kommunikation Bot → GUI (über update_queue):
     ("status",  text)           → Status-Label oben rechts aktualisieren
     ("stopped", None)           → Bot-Thread ist fertig, Buttons zurücksetzen
 
+Debug-Fenster (optional, über Buttons):
+    "DEBUG OVERLAY"  → öffnet DebugOverlay (debugtools.py)
+    "HSV CALIB"      → öffnet HsvCalibrator (debugtools.py)
+    Beide Fenster sind unabhängig und können jederzeit geöffnet/geschlossen werden.
+
 Hinweis zu Drift:
     Der Bot-Thread nutzt current.drift (Singleton aus Current).
     Kein eigenes Drift(config) instanziieren – sonst stimmt der Break-Zähler nicht.
@@ -89,6 +94,14 @@ class Harbor(tk.Tk):
         self.bot_thread = None
         self.update_queue = queue.Queue()
 
+        # ShoreWatch Instanz – wird beim Start erstellt und an Debug-Fenster weitergegeben
+        self._shore = None
+        self._config = None
+
+        # Referenzen auf Debug-Fenster (damit nicht mehrfach geöffnet werden)
+        self._debug_overlay = None
+        self._hsv_calibrator = None
+
         # Session-Stats als tkinter StringVars (auto-update UI)
         self.stats = {
             "waves":   tk.StringVar(value="0"),
@@ -101,7 +114,7 @@ class Harbor(tk.Tk):
             "status":  tk.StringVar(value="IDLE"),
         }
 
-        # Rohe Integer-Werte für Berechnungen (StringVars nur für Anzeige)
+        # Rohe Integer-Werte für Berechnungen
         self._raw = {k: 0 for k in ["waves", "caught", "missed", "escaped", "early"]}
         self._session_start = None
 
@@ -124,7 +137,7 @@ class Harbor(tk.Tk):
                  fg=COLORS["accent"], font=("Courier New", 13, "bold")
                  ).pack(side="left")
 
-        tk.Label(header, text="SSC Edition  //  v1.1.0",
+        tk.Label(header, text="SSC Edition  //  v1.2.0",
                  bg=COLORS["bg"], fg=COLORS["muted"],
                  font=("Courier New", 9)
                  ).pack(side="left", padx=(10, 0), pady=(3, 0))
@@ -157,7 +170,6 @@ class Harbor(tk.Tk):
     def _build_stats(self, parent):
         """Linke Spalte: Session-Timer und alle Stat-Karten."""
 
-        # Session-Timer
         timer_card = tk.Frame(parent, bg=COLORS["bg_card"],
                               highlightbackground=COLORS["border"],
                               highlightthickness=1)
@@ -172,7 +184,6 @@ class Harbor(tk.Tk):
                  font=("Courier New", 22, "bold")
                  ).pack(anchor="w", padx=10, pady=(0, 8))
 
-        # Stat-Karten: (Label, stats-key, Farbe, Icon)
         cards = [
             ("CASTS",        "waves",   COLORS["text_bright"], "🎣"),
             ("CAUGHT",       "caught",  COLORS["success"],     "🐟"),
@@ -218,8 +229,7 @@ class Harbor(tk.Tk):
         )
         self.log_box.pack(fill="both", expand=True)
 
-        # Farbige Tags für verschiedene Log-Ereignistypen
-        tag_colors = {
+        for tag, color in {
             "cast":    COLORS["log_cast"],
             "bite":    COLORS["log_bite"],
             "miss":    COLORS["log_miss"],
@@ -228,16 +238,16 @@ class Harbor(tk.Tk):
             "warn":    COLORS["log_warn"],
             "dim":     COLORS["log_default"],
             "bright":  COLORS["text_bright"],
-        }
-        for tag, color in tag_colors.items():
+        }.items():
             self.log_box.tag_config(tag, foreground=color)
 
     def _build_controls(self):
-        """Untere Leiste: Start/Stop-Buttons und Failsafe-Hinweis."""
+        """Untere Leiste: Start/Stop + Debug-Buttons + Failsafe-Hinweis."""
 
         ctrl = tk.Frame(self, bg=COLORS["bg"])
         ctrl.pack(fill="x", padx=16, pady=10)
 
+        # Start / Stop
         self.btn_start = tk.Button(
             ctrl, text="▶  START",
             bg=COLORS["accent_dim"], fg=COLORS["accent"],
@@ -259,14 +269,61 @@ class Harbor(tk.Tk):
         )
         self.btn_stop.pack(side="left", padx=(8, 0))
 
+        # Debug-Buttons (nur aktiv wenn Bot läuft)
+        self.btn_debug = tk.Button(
+            ctrl, text="🔍  DEBUG",
+            bg=COLORS["bg_card"], fg=COLORS["muted"],
+            font=("Courier New", 9),
+            bd=0, padx=12, pady=8, cursor="hand2",
+            state="disabled",
+            command=self._open_debug_overlay
+        )
+        self.btn_debug.pack(side="left", padx=(16, 0))
+
+        self.btn_hsv = tk.Button(
+            ctrl, text="🎨  HSV CALIB",
+            bg=COLORS["bg_card"], fg=COLORS["muted"],
+            font=("Courier New", 9),
+            bd=0, padx=12, pady=8, cursor="hand2",
+            state="disabled",
+            command=self._open_hsv_calibrator
+        )
+        self.btn_hsv.pack(side="left", padx=(6, 0))
+
         tk.Label(ctrl,
-                 text="Failsafe: Maus in obere linke Ecke stoppt den Bot sofort",
+                 text="Failsafe: Maus in obere linke Ecke",
                  bg=COLORS["bg"], fg=COLORS["muted"],
                  font=("Courier New", 8)
                  ).pack(side="right")
 
     # -------------------------------------------------------------------------
-    # Logging (thread-safe via Queue)
+    # Debug-Fenster öffnen
+    # -------------------------------------------------------------------------
+
+    def _open_debug_overlay(self):
+        """Öffnet das Debug-Overlay (oder bringt es in den Vordergrund)."""
+        from debugtools import DebugOverlay
+
+        if self._debug_overlay and self._debug_overlay.winfo_exists():
+            self._debug_overlay.lift()
+            return
+
+        if self._shore and self._config:
+            self._debug_overlay = DebugOverlay(self, self._shore, self._config)
+
+    def _open_hsv_calibrator(self):
+        """Öffnet den HSV-Kalibrator (oder bringt ihn in den Vordergrund)."""
+        from debugtools import HsvCalibrator
+
+        if self._hsv_calibrator and self._hsv_calibrator.winfo_exists():
+            self._hsv_calibrator.lift()
+            return
+
+        if self._config:
+            self._hsv_calibrator = HsvCalibrator(self, self._config)
+
+    # -------------------------------------------------------------------------
+    # Logging
     # -------------------------------------------------------------------------
 
     def _append_log(self, message: str, tag: str):
@@ -293,19 +350,13 @@ class Harbor(tk.Tk):
             self.stats["rate"].set(f"{(self._raw['caught'] / waves * 100):.1f}%")
 
     # -------------------------------------------------------------------------
-    # Queue pollen – Bot-Thread → Main-Thread Kommunikation
+    # Queue pollen
     # -------------------------------------------------------------------------
 
     def _poll_queue(self):
         """
         Verarbeitet alle ausstehenden Nachrichten aus update_queue.
         Wird alle 80ms vom Main-Thread via after() aufgerufen.
-
-        Nachrichtenformate:
-            ("log",     message, tag)   → Log-Zeile einfügen
-            ("stat",    key)            → Stat erhöhen
-            ("status",  text)           → Status-Label aktualisieren
-            ("stopped", None)           → Buttons zurücksetzen
         """
         try:
             while True:
@@ -335,7 +386,7 @@ class Harbor(tk.Tk):
     # -------------------------------------------------------------------------
 
     def _tick_timer(self):
-        """Aktualisiert den Session-Timer jede Sekunde (nur wenn Bot läuft)."""
+        """Aktualisiert den Session-Timer jede Sekunde."""
         if self._session_start and self.bot_running:
             elapsed = int(time.time() - self._session_start)
             h, rem = divmod(elapsed, 3600)
@@ -348,11 +399,10 @@ class Harbor(tk.Tk):
     # -------------------------------------------------------------------------
 
     def _start_bot(self):
-        """Setzt Stats zurück, startet den Bot in einem Daemon-Thread."""
+        """Setzt Stats zurück, erstellt ShoreWatch/Config, startet Bot-Thread."""
         if self.bot_running:
             return
 
-        # Stats zurücksetzen
         for k in self._raw:
             self._raw[k] = 0
             self.stats[k].set("0")
@@ -364,10 +414,11 @@ class Harbor(tk.Tk):
 
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
+        self.btn_debug.configure(state="normal", fg=COLORS["accent"])
+        self.btn_hsv.configure(state="normal", fg=COLORS["accent"])
 
         self.update_queue.put(("status", "RUNNING"))
 
-        # Daemon-Thread: wird automatisch beendet wenn das Hauptfenster geschlossen wird
         self.bot_thread = threading.Thread(target=self._run_bot, daemon=True)
         self.bot_thread.start()
 
@@ -379,23 +430,24 @@ class Harbor(tk.Tk):
         """Wird aufgerufen wenn der Bot-Thread sauber beendet wurde."""
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
+        self.btn_debug.configure(state="disabled", fg=COLORS["muted"])
+        self.btn_hsv.configure(state="disabled", fg=COLORS["muted"])
         self.update_queue.put(("status", "STOPPED"))
 
     # -------------------------------------------------------------------------
-    # Bot-Loop (läuft im eigenen Thread)
+    # Bot-Loop
     # -------------------------------------------------------------------------
 
     def _run_bot(self):
         """
         Hauptschleife des Bots – läuft in einem separaten Thread.
-
         Kommuniziert mit der GUI ausschließlich über self.update_queue.
         Greift auf Drift über current.drift zu (kein eigenes Drift() instanziieren).
         """
         q = self.update_queue
-        config = TideConfig()
-        shore = ShoreWatch(config)
-        current = Current(config)
+        self._config = TideConfig()
+        self._shore = ShoreWatch(self._config)
+        current = Current(self._config)
         human = current.drift  # Drift-Singleton aus Current
 
         def log(msg, tag="dim"):
@@ -416,19 +468,16 @@ class Harbor(tk.Tk):
 
         while self.bot_running:
             stat("waves")
-            wave_num = self._raw["waves"]
-            log(f"Wave #{wave_num}", "bright")
+            log(f"Wave #{self._raw['waves']}", "bright")
 
-            # Cast
             current.cast()
-            log(f"Line cast  (key: '{config.CAST_KEY}')", "cast")
-            time.sleep(config.SETTLE_DRIFT)
+            log(f"Line cast  (key: '{self._config.CAST_KEY}')", "cast")
+            time.sleep(self._config.SETTLE_DRIFT)
 
             if not self.bot_running:
                 break
 
-            # Buoy suchen
-            buoy = shore.find_buoy()
+            buoy = self._shore.find_buoy()
             if buoy is None:
                 log("Buoy not spotted – retrying...", "warn")
                 time.sleep(1)
@@ -436,17 +485,15 @@ class Harbor(tk.Tk):
 
             log(f"Buoy spotted at {buoy}", "cast")
 
-            # Zu früh reagieren? (~1%)
             if human.should_react_early():
                 stat("early")
                 log("Early reaction – false splash! Recasting.", "brk")
                 current.reel_in(buoy)
-                time.sleep(config.HAUL_DELAY)
+                time.sleep(self._config.HAUL_DELAY)
                 continue
 
-            # Auf echten Biss warten
             log("Reading the tide...", "dim")
-            bite = shore.await_ripple(buoy)
+            bite = self._shore.await_ripple(buoy)
 
             if not self.bot_running:
                 break
@@ -458,13 +505,11 @@ class Harbor(tk.Tk):
 
             log("Ripple detected!", "bite")
 
-            # Zu spät reagieren? (~3%)
             if human.should_react_late():
                 delay = human.late_reaction_delay()
                 log(f"Slow reaction (+{delay:.1f}s)...", "dim")
                 time.sleep(delay)
 
-            # Einholen
             success = current.reel_in(buoy)
 
             if not success:
@@ -474,7 +519,7 @@ class Harbor(tk.Tk):
 
             stat("caught")
             log(f"Hauled in!  Total: {self._raw['caught']} 🐟", "bite")
-            time.sleep(config.HAUL_DELAY)
+            time.sleep(self._config.HAUL_DELAY)
 
         log("─" * 42, "dim")
         log("SafeHaven docked.", "bright")

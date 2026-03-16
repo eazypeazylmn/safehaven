@@ -12,11 +12,22 @@ Technischer Hintergrund:
     - Screenshots werden mit mss gemacht (sehr schnell, nutzt DirectX/X11)
     - OpenCV konvertiert BGR -> HSV für zuverlässige Farberkennung
     - Bewegungserkennung via Frame-Differenz (aktueller Frame vs. vorheriger)
+
+Debug-State:
+    ShoreWatch befüllt self.debug_state mit den aktuellen Frames und
+    der erkannten Buoy-Position. DebugOverlay (debugtools.py) liest
+    daraus – niemals direkt in tkinter schreiben vom Bot-Thread!
+
+    debug_state keys:
+        "scan_frame"    np.ndarray  Letzter SCAN_WATERS Screenshot (BGR)
+        "ripple_frame"  np.ndarray  Letzter tide_zone Screenshot (BGR)
+        "buoy"          tuple|None  Letzte erkannte Buoy-Position (x, y)
 ================================================================================
 """
 
 import time
 import logging
+import threading
 
 import cv2
 import numpy as np
@@ -28,13 +39,48 @@ from tideconfig import TideConfig
 class ShoreWatch:
     """
     Beobachtet den Bildschirm: findet den Buoy (Bobber) und erkennt Ripples (Bisse).
+
+    Attributes:
+        debug_state: Thread-safe dict für DebugOverlay.
+                     Wird vom Bot-Thread geschrieben, vom Main-Thread gelesen.
     """
 
     def __init__(self, config: TideConfig):
         self.config = config
         self.log = logging.getLogger(__name__)
+
         # mss-Instanz einmal erstellen und wiederverwenden (effizienter)
         self.ocean = mss.mss()
+
+        # Thread-safe Debug-State für DebugOverlay (debugtools.py)
+        # Lock stellt sicher dass Main-Thread und Bot-Thread nicht gleichzeitig schreiben/lesen
+        self._debug_lock = threading.Lock()
+        self._debug_state = {
+            "scan_frame":   None,  # Letzter SCAN_WATERS Screenshot
+            "ripple_frame": None,  # Letzter tide_zone Screenshot
+            "buoy":         None,  # Letzte erkannte Buoy-Position
+        }
+
+    @property
+    def debug_state(self) -> dict:
+        """
+        Thread-safe Lesezugriff auf den Debug-State.
+        Gibt eine Kopie zurück damit der Main-Thread nicht mit veralteten
+        Referenzen arbeitet während der Bot-Thread schreibt.
+        """
+        with self._debug_lock:
+            return dict(self._debug_state)
+
+    def _update_debug(self, **kwargs):
+        """
+        Thread-safe Schreibzugriff auf den Debug-State.
+        Wird vom Bot-Thread aufgerufen.
+
+        Args:
+            **kwargs: Beliebige debug_state keys mit neuen Werten
+        """
+        with self._debug_lock:
+            self._debug_state.update(kwargs)
 
     def _grab_waters(self, region: tuple | None = None) -> np.ndarray:
         """
@@ -91,11 +137,17 @@ class ShoreWatch:
             4. Zusammenhängende Bereiche (Contours) finden
             5. Wahrscheinlichsten Buoy-Kandidaten zurückgeben
 
+        Schreibt scan_frame und buoy in debug_state.
+
         Returns:
             (x, y) absolute Bildschirmkoordinaten des Buoys, oder None
         """
         frame = self._grab_waters(self.config.SCAN_WATERS)
-        hsv   = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        # Frame für DebugOverlay speichern
+        self._update_debug(scan_frame=frame.copy(), buoy=None)
+
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         shore_mask = self._mask_red_shore(hsv)
 
         # Morphologische Operation: kleine Lücken schließen, Rauschen entfernen
@@ -103,7 +155,6 @@ class ShoreWatch:
         shore_mask = cv2.morphologyEx(shore_mask, cv2.MORPH_CLOSE, kernel)
         shore_mask = cv2.morphologyEx(shore_mask, cv2.MORPH_OPEN, kernel)
 
-        # Zusammenhängende rote Bereiche finden
         swells, _ = cv2.findContours(
             shore_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
@@ -111,7 +162,7 @@ class ShoreWatch:
         if not swells:
             return None
 
-        # Kandidaten nach Größe filtern (zu klein = Rauschen, zu groß = UI-Element)
+        # Kandidaten nach Größe filtern
         calm_swells = [
             s for s in swells
             if self.config.MIN_BUOY_DRIFT < cv2.contourArea(s) < self.config.MAX_BUOY_DRIFT
@@ -120,10 +171,8 @@ class ShoreWatch:
         if not calm_swells:
             return None
 
-        # Größten validen Bereich als Buoy wählen
         buoy_swell = max(calm_swells, key=cv2.contourArea)
 
-        # Mittelpunkt des Buoys berechnen
         M = cv2.moments(buoy_swell)
         if M["m00"] == 0:
             return None
@@ -131,22 +180,29 @@ class ShoreWatch:
         cx = int(M["m10"] / M["m00"])
         cy = int(M["m01"] / M["m00"])
 
-        # Falls SCAN_WATERS gesetzt ist: Offset addieren für absolute Koordinaten
+        # Offset addieren falls SCAN_WATERS gesetzt ist
         if self.config.SCAN_WATERS:
             ox, oy, _, _ = self.config.SCAN_WATERS
             cx += ox
             cy += oy
 
-        return (cx, cy)
+        buoy = (cx, cy)
+
+        # Buoy-Position in debug_state speichern
+        self._update_debug(buoy=buoy)
+
+        return buoy
 
     def await_ripple(self, buoy: tuple) -> bool:
         """
         Überwacht den Buoy auf eine Ripple (Splash-Animation = Biss).
 
         Funktioniert durch Frame-Differenz:
-            - Nimmt regelmäßig Screenshots der Buoy-Region
+            - Nimmt regelmäßig Screenshots der Buoy-Region (tide_zone)
             - Vergleicht aktuellen Frame mit dem vorherigen
             - Starke Veränderung = Wassersplash = Biss
+
+        Schreibt ripple_frame laufend in debug_state.
 
         Args:
             buoy: (x, y) Bildschirmkoordinaten des Buoys
@@ -157,7 +213,6 @@ class ShoreWatch:
         bx, by = buoy
         radius = self.config.RIPPLE_RADIUS
 
-        # Überwachungsregion um den Buoy
         tide_zone = (bx - radius, by - radius, radius * 2, radius * 2)
 
         prev_wave = None
@@ -165,15 +220,16 @@ class ShoreWatch:
 
         while time.time() - drift_start < self.config.MAX_DRIFT_TIME:
             current_wave = self._grab_waters(tide_zone)
+
+            # Frame für DebugOverlay speichern
+            self._update_debug(ripple_frame=current_wave.copy())
+
             gray_wave = cv2.cvtColor(current_wave, cv2.COLOR_BGR2GRAY)
-            # Leichtes Blur reduziert Fehlalarme durch Bildrauschen
             gray_wave = cv2.GaussianBlur(gray_wave, (5, 5), 0)
 
             if prev_wave is not None:
-                # Differenz zwischen aktuellem und vorherigem Frame
                 delta = cv2.absdiff(prev_wave, gray_wave)
 
-                # Nur signifikante Veränderungen zählen
                 _, swell_thresh = cv2.threshold(
                     delta,
                     self.config.RIPPLE_THRESHOLD,
@@ -190,5 +246,4 @@ class ShoreWatch:
             prev_wave = gray_wave
             time.sleep(self.config.TIDE_PULSE)
 
-        # Timeout – kein Biss innerhalb der Wartezeit
         return False
