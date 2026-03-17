@@ -1,18 +1,17 @@
-# Updated tideconfig.py
+class TideConfig:
+    # Existing attributes restored
+    # ... [other attributes and methods] ...
 
-# Existing constants for backward compatibility
-SETTLE_DRIFT_MIN = ...  # existing value
-SETTLE_DRIFT_MAX = ...  # existing value
-HAUL_DELAY_MIN = ...  # existing value
-HAUL_DELAY_MAX = ...  # existing value
-RETRY_DELAY_MIN = ...  # existing value
-RETRY_DELAY_MAX = ...  # existing value
+    # New optional timing ranges
+    SETTLE_DRIFT_MIN = 1.2
+    SETTLE_DRIFT_MAX = 1.9
+    HAUL_DELAY_MIN = 0.35
+    HAUL_DELAY_MAX = 0.8
+    RETRY_DELAY_MIN = 0.6
+    RETRY_DELAY_MAX = 1.4
 
-# Adjustments according to the request
-# Wider SHORE_HUE range
-SHORE_HUE_MIN = 10  # Adjusted from 10 to 15
-SHORE_HUE_MAX = 15
-
-# Slightly lower saturation/value thresholds
-SATURATION_THRESHOLD = ...  # existing value (lower slightly)
-VALUE_THRESHOLD = ...  # existing value (lower slightly)
+    # Adjusted Hue and Saturation/Value
+    SHORE_HUE_HIGH_1 = (10, 255, 255)
+    SHORE_HUE_HIGH_2 = (15, 255, 255)
+    SHORE_HUE_LOW_1 = (0, 90, 60)
+    SHORE_HUE_LOW_2 = (165, 90, 60)
